@@ -31,6 +31,8 @@ const MONTH_NAMES = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug',
 const COMPLETED_METRICS = new Set(['Sentenced','Dismissed']);
 
 let MIN_CASE_YEAR = null;
+let LATEST_CASE_YEAR = null;   // NEW
+let LATEST_DEF_YEAR  = null;   // NEW
 
 
 function isValidDate(d){ return d instanceof Date && !Number.isNaN(d.getTime()); }
@@ -47,47 +49,58 @@ function keyFromRecord(r, range, mode){
   return `${y}-${m}`;
 }
 
-function buildBuckets(rows, range, mode, metric, floorYear){
+function buildBuckets(rows, range, mode, metric, floorYear, fixedYear){
+  if (range === 'last12'){
+    // If we know the latest file year, force Jan–Dec of that year
+    if (Number.isInteger(fixedYear)) {
+      const out = [];
+      for (let i = 0; i < 12; i++){
+        const y  = fixedYear;
+        const m0 = i;
+        out.push({
+          y, m: m0 + 1,
+          label: `${MONTH_NAMES[m0]} '${String(y).slice(-2)}`,
+          key: `${y}-${m0 + 1}`
+        });
+      }
+      return floorYear ? out.filter(b => b.y >= floorYear) : out;
+    }
 
- if (range === 'last12'){
-  const useRow = r =>
-    mode !== 'status' ? true :
-    (COMPLETED_METRICS.has(metric) ? r.status === metric : true);
+    // Fallback to rolling window only if no fixedYear is known
+    const useRow = r =>
+      mode !== 'status' ? true :
+      (COMPLETED_METRICS.has(metric) ? r.status === metric : true);
 
-  const times = rows
-    .filter(useRow)
-    .map(r => mode === 'status' ? r.status_ts : r.ts)
-    .filter(Number.isFinite);
+    const times = rows
+      .filter(useRow)
+      .map(r => mode === 'status' ? r.status_ts : r.ts)
+      .filter(Number.isFinite);
 
-  if (!times.length) return [];
+    if (!times.length) return [];
 
-  const maxTs = Math.max(...times);
-  const maxD = new Date(maxTs);
-  const startY = maxD.getFullYear();
-  const startM = maxD.getMonth();
+    const maxTs  = Math.max(...times);
+    const maxD   = new Date(maxTs);
+    const startY = maxD.getFullYear();
+    const startM = maxD.getMonth();
 
-  const out = [];
-  for (let i = 11; i >= 0; i--){
-    const offset = startM - i;
-    const y = startY + Math.floor(offset / 12);
-    const m0 = (offset % 12 + 12) % 12;
-    out.push({
-      y, m: m0 + 1,
-      label: `${MONTH_NAMES[m0]} '${String(y).slice(-2)}`,
-      key: `${y}-${m0 + 1}`
-    });
+    const out = [];
+    for (let i = 11; i >= 0; i--){
+      const offset = startM - i;
+      const y  = startY + Math.floor(offset / 12);
+      const m0 = (offset % 12 + 12) % 12;
+      out.push({
+        y, m: m0 + 1,
+        label: `${MONTH_NAMES[m0]} '${String(y).slice(-2)}`,
+        key: `${y}-${m0 + 1}`
+      });
+    }
+    return floorYear ? out.filter(b => b.y >= floorYear) : out;
   }
 
-  return floorYear ? out.filter(b => b.y >= floorYear) : out;
-}
-
-
-
-
   if (range === 'monthly'){
-   const yrs = [...new Set(rows.map(r => mode==='status' ? r.status_year : r.year))]
-  .filter(y => y && (!floorYear || y >= floorYear))
-  .sort((a,b)=>a-b);
+    const yrs = [...new Set(rows.map(r => mode==='status' ? r.status_year : r.year))]
+      .filter(y => y && (!floorYear || y >= floorYear))
+      .sort((a,b)=>a-b);
 
     const out = [];
     yrs.forEach(y=>{
@@ -99,9 +112,9 @@ function buildBuckets(rows, range, mode, metric, floorYear){
   }
 
   if (range === 'quarterly'){
-   const yrs = [...new Set(rows.map(r => mode==='status' ? r.status_year : r.year))]
-  .filter(y => y && (!floorYear || y >= floorYear))
-  .sort((a,b)=>a-b);
+    const yrs = [...new Set(rows.map(r => mode==='status' ? r.status_year : r.year))]
+      .filter(y => y && (!floorYear || y >= floorYear))
+      .sort((a,b)=>a-b);
 
     const out = [];
     yrs.forEach(y=>{
@@ -113,11 +126,11 @@ function buildBuckets(rows, range, mode, metric, floorYear){
   }
 
   const yrs = [...new Set(rows.map(r => mode === 'status' ? r.status_year : r.year))]
-  .filter(y => y && (!floorYear || y >= floorYear))
-  .sort((a,b) => a - b);
-return yrs.map(y => ({ y, label: String(y), key: String(y) }));
-
+    .filter(y => y && (!floorYear || y >= floorYear))
+    .sort((a,b) => a - b);
+  return yrs.map(y => ({ y, label: String(y), key: String(y) }));
 }
+
 
 /***** HOVER BAR PLUGIN *****/
 const hoverBar = {
@@ -172,14 +185,18 @@ const loaded = { cases:false, defendants:false };
 async function ensureLoaded(dataset) {
   if (loaded[dataset]) return;
   const years = await discoverYears(dataset);
+
   if (dataset === 'cases') {
-   MIN_CASE_YEAR = years.length ? Math.min(...years) : null;
+    MIN_CASE_YEAR     = years.length ? Math.min(...years) : null;
+    LATEST_CASE_YEAR  = years.length ? Math.max(...years) : null;   // NEW
     await loadCasesData(years);
   } else {
+    LATEST_DEF_YEAR   = years.length ? Math.max(...years) : null;   // NEW
     await loadDefendantsData(years);
   }
   loaded[dataset] = true;
 }
+
 
 /* initial load (default select is Cases) */
 ensureLoaded('cases').then(() => {
@@ -370,11 +387,20 @@ const floorYear = isCaseMode ? MIN_CASE_YEAR : null;
 
   // Pie mode: allow in both datasets, but for cases we only enable pie
   // when the metric is all_cases or a status metric
+    // Pie mode: allow in both datasets, but for cases only enable pie
+  // when the metric is all_cases or a status metric
+  // Pie mode: allow in both datasets, but for cases only enable pie
+  // when the metric is all_cases or a status metric
   const pieMode  = document.getElementById('pieToggle').checked &&
                    (isCaseMode ? (metric === 'all_cases' || STATUS_TYPES.includes(metric)) : true);
 
+  // Lock last12 to the latest file year for the active dataset
+  const fixedYear = isCaseMode ? LATEST_CASE_YEAR : LATEST_DEF_YEAR;
+
   /* buckets */
-  const buckets = buildBuckets(rows, range, timeMode, metric, floorYear);
+  const buckets = buildBuckets(rows, range, timeMode, metric, floorYear, fixedYear);
+
+
 if (!buckets.length) {
   const grid = document.getElementById('chartGrid');
   grid.innerHTML = `
@@ -744,6 +770,7 @@ document.getElementById('toStats').onclick = () => activatePanel(1);
 document.getElementById('toMonthly').onclick = () => activatePanel(2);
 
 window.build = build;
+
 
 
 
